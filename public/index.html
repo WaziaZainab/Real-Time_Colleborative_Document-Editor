@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Collaborative Document Editor</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin:0; padding:0; background:#f9f9f9; }
+    header { background:#4CAF50; color:white; padding:10px; text-align:center; }
+    #toolbar { padding:10px; background:#eee; border-bottom:1px solid #ccc; }
+    #toolbar button, #toolbar select, #toolbar input { margin-right:5px; }
+    #editor {
+      width: 90%; height: 60vh; margin:20px auto; padding:15px;
+      border:1px solid #ccc; background:white; overflow-y:auto;
+    }
+    footer { text-align:center; padding:10px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:12px; font-size:12px; }
+    .ok { background:#c8e6c9; color:#256029; }
+    .danger { background:#ffcdd2; color:#b71c1c; }
+  </style>
+</head>
+<body>
+  <header><h2>Collaborative Document Editor</h2></header>
+
+  <!-- Toolbar -->
+  <div id="toolbar">
+    <button data-cmd="bold" id="bold"><b>B</b></button>
+    <button data-cmd="italic" id="italic"><i>I</i></button>
+    <button data-cmd="underline" id="underline"><u>U</u></button>
+
+    <select id="block">
+      <option value="paragraph">Paragraph</option>
+      <option value="h1">Heading 1</option>
+      <option value="h2">Heading 2</option>
+      <option value="h3">Heading 3</option>
+      <option value="blockquote">Quote</option>
+      <option value="pre">Code</option>
+    </select>
+
+    <select id="fontName">
+      <option value="">Font</option>
+      <option>Arial</option>
+      <option>Courier New</option>
+      <option>Georgia</option>
+      <option>Times New Roman</option>
+      <option>Verdana</option>
+    </select>
+
+    <select id="fontSize">
+      <option value="">Size</option>
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
+      <option value="6">6</option>
+      <option value="7">7</option>
+    </select>
+
+    <input type="color" id="foreColor">
+    <input type="color" id="hiliteColor">
+
+    <button id="linkBtn">Link</button>
+    <button id="imgBtn">Image</button>
+
+    <button id="saveBtn">Save</button>
+    <button id="downloadHtml">Download HTML</button>
+    <button id="downloadTxt">Download TXT</button>
+    <button id="printBtn">Print</button>
+    <input type="file" id="fileInput">
+  </div>
+
+  <!-- Editor -->
+  <div id="editor" contenteditable="true"></div>
+
+  <footer>
+    <span id="wc">0 words</span> | 
+    <span id="sc">0 chars</span> | 
+    <span id="saved" class="pill">Not saved</span>
+  </footer>
+
+  <script>
+    const editor = document.getElementById('editor');
+
+    // === Socket.io collaborative sync ===
+    const socket = io();
+    const params = new URLSearchParams(window.location.search);
+    const docId = params.get("doc") || "default";
+
+    socket.emit("get-document", docId);
+
+    socket.on("load-document", content => {
+      editor.innerHTML = content;
+      updateCounts();
+    });
+
+    editor.addEventListener("input", () => {
+      socket.emit("send-changes", editor.innerHTML);
+      updateCounts();
+      markDirty();
+    });
+
+    socket.on("receive-changes", content => {
+      editor.innerHTML = content;
+      updateCounts();
+    });
+
+    // === Rich text helper ===
+    function cmd(command, value=null){
+      document.execCommand(command, false, value);
+      editor.focus();
+      updateCounts();
+      markDirty();
+    }
+
+    // Toolbar buttons
+    document.querySelectorAll('[data-cmd]').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        cmd(b.getAttribute('data-cmd'));
+      });
+    });
+
+    // Block type
+    document.getElementById('block').addEventListener('change', e=>{
+      const v = e.target.value;
+      const map = { h1:'H1', h2:'H2', h3:'H3', blockquote:'BLOCKQUOTE', pre:'PRE', paragraph:'P' };
+      cmd('formatBlock', v==='paragraph'?'P':map[v]);
+    });
+
+    // Fonts & colors
+    document.getElementById('fontName').addEventListener('change', e=>{ if(e.target.value) cmd('fontName', e.target.value); });
+    document.getElementById('fontSize').addEventListener('change', e=>{ if(e.target.value) cmd('fontSize', e.target.value); });
+    document.getElementById('foreColor').addEventListener('change', e=>{ cmd('foreColor', e.target.value); });
+    document.getElementById('hiliteColor').addEventListener('change', e=>{ cmd('hiliteColor', e.target.value); });
+
+    // Link
+    document.getElementById('linkBtn').addEventListener('click', ()=>{
+      const url = prompt('Enter URL');
+      if(url && /^https?:\/\//i.test(url)) cmd('createLink', url);
+    });
+
+    // Image
+    document.getElementById('imgBtn').addEventListener('click', ()=>{
+      const url = prompt('Image URL');
+      if(!url) return;
+      const img = document.createElement('img');
+      img.src = url; img.style.maxWidth='100%';
+      const range = document.getSelection().getRangeAt(0);
+      range.insertNode(img);
+      updateCounts(); markDirty();
+    });
+
+    // Word/char count
+    const wc = document.getElementById('wc');
+    const sc = document.getElementById('sc');
+    function updateCounts(){
+      const text = editor.innerText || '';
+      const words = text.trim().length ? text.trim().split(/\s+/).length : 0;
+      wc.textContent = words + (words===1? ' word':' words');
+      sc.textContent = text.length + (text.length===1? ' char':' chars');
+    }
+
+    // Autosave local
+    const KEY = 'docEditorContent.v1';
+    const saved = document.getElementById('saved');
+    let dirty = false; let saveTimer;
+    function markDirty(){
+      dirty = true; saved.textContent = 'Unsaved changes'; saved.className='pill danger';
+      if(saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(autoSave, 800);
+    }
+    function autoSave(){
+      localStorage.setItem(KEY, editor.innerHTML);
+      dirty = false; saved.textContent = 'Saved'; saved.className='pill ok';
+    }
+    document.getElementById('saveBtn').addEventListener('click', autoSave);
+
+    // Restore
+    const savedContent = localStorage.getItem(KEY);
+    if(savedContent) editor.innerHTML = savedContent;
+    updateCounts();
+
+    // Downloads
+    function download(filename, type, data){
+      const blob = new Blob([data], {type});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download=filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+    document.getElementById('downloadHtml').addEventListener('click', ()=>{
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>Document</title></head><body>${editor.innerHTML}</body></html>`;
+      download('document.html','text/html', html);
+    });
+    document.getElementById('downloadTxt').addEventListener('click', ()=>{ download('document.txt','text/plain', editor.innerText); });
+
+    // Print
+    document.getElementById('printBtn').addEventListener('click', ()=>{
+      const w = window.open('', '_blank');
+      w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Print</title></head>
+        <body style="font-family:Serif; margin:40px">${editor.innerHTML}</body></html>`);
+      w.document.close(); w.focus(); w.print();
+    });
+
+    // Import file
+    document.getElementById('fileInput').addEventListener('change', async (e)=>{
+      const file = e.target.files[0]; if(!file) return;
+      const text = await file.text();
+      if(/<\s*html/i.test(text)){
+        const temp = document.createElement('html'); temp.innerHTML = text;
+        const body = temp.querySelector('body');
+        editor.innerHTML = body ? body.innerHTML : text;
+      } else {
+        editor.innerHTML = text.split(/\n\n+/).map(p=>`<p>${p.replace(/\n/g,'<br>')}</p>`).join('');
+      }
+      updateCounts(); markDirty();
+    });
+
+    // Warn unsaved
+    window.addEventListener('beforeunload', (e)=>{ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+  </script>
+</body>
+</html>
+
